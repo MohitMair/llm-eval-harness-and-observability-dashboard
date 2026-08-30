@@ -156,3 +156,7 @@ deepEval/
 ```
 
 See [`docs/TECHNICAL.md`](docs/TECHNICAL.md) for internals and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for diagrams.
+
+## 8. Project layout
+
+
