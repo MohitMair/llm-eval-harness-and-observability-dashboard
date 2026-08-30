@@ -1,6 +1,7 @@
-# DeepEval — AA Breakdown AI Evaluation Harness
+# LLM Evaluation Harness using DeepEval
 
-An offline, local evaluation harness for a UK **AA breakdown insurance** conversational AI product.
+An offline, local evaluation harness for a conversational AI product. (a public website has been used as an example for sample scripts. No sensitive data of IP is compromised)
+
 A **JavaScript orchestrator** drives the flow and calls **Python DeepEval** to score each answer with an
 **LLM‑as‑judge** (local Ollama `llama3`). It produces per‑run reports, a diagnostic drill‑down, and a
 single self‑contained **HTML trend dashboard**.
