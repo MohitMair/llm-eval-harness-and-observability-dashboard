@@ -7,7 +7,7 @@ A **JavaScript orchestrator** drives the flow and calls **Python DeepEval** to s
 single self‑contained **HTML trend dashboard**.
 
 - **Product under test:** local Ollama today, your real API later — flip one switch.
-- **Judge:** local Ollama (`llama3`) via a custom DeepEval model wrapper — no OpenAI key, no internet.
+- **Judge:** local Ollama (`llama3`) via a custom DeepEval model wrapper — no OpenAI key, no internet. Can be replaced by real LLM config.
 - **Metrics:** 13 quality/retrieval/safety metrics + operational metrics (latency, tokens, cost, failure/retry).
 - **Diagnostics:** root‑cause tagging + drill‑down matrices (metric × category × subcategory × journey).
 - **Dashboard:** one HTML file, inline SVG charts, works by double‑clicking (no CDN/assets).
