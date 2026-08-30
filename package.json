@@ -1,0 +1,16 @@
+{
+  "name": "deepeval-aa-breakdown",
+  "version": "1.0.0",
+  "description": "DeepEval evaluation harness (JS orchestrator + Python DeepEval) for a UK AA breakdown insurance AI product.",
+  "type": "commonjs",
+  "scripts": {
+    "eval": "node src/runEval.js",
+    "eval:ollama": "AI_SOURCE=ollama node src/runEval.js",
+    "eval:api": "AI_SOURCE=api node src/runEval.js",
+    "dashboard": "node src/dashboard.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

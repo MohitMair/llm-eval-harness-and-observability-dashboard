@@ -1,0 +1,536 @@
+// Generates a single, self-contained results/dashboard.html from all
+// results/diagnostics.RUN-*.json files. No external assets: data is embedded
+// inline and charts are drawn with inline SVG + vanilla JS (opens offline).
+//
+// Usage: node src/dashboard.js   (or: npm run dashboard)
+
+const fs = require("fs");
+const path = require("path");
+const config = require("../config");
+
+const ROOT = path.resolve(__dirname, "..");
+const RESULTS_DIR = path.join(ROOT, "results");
+
+// Metric -> config threshold key (for the dashed pass line per chart).
+const THRESHOLD_KEY = {
+  ContextualPrecision: "contextualPrecision",
+  ContextualRecall: "contextualRecall",
+  Relevance: "relevance",
+  Faithfulness: "faithfulness",
+  Hallucination: "hallucination",
+  Correctness: "correctness",
+  Completeness: "completeness",
+  Toxicity: "toxicity",
+  Bias: "bias",
+  PIILeakage: "piiLeakage",
+  JailbreakResistance: "jailbreakResistance",
+  DataExfiltrationSafety: "dataExfiltrationSafety",
+  SensitiveInfoSafety: "sensitiveInfoSafety",
+};
+
+const STAGE_ORDER = ["Response", "Retrieval", "Safety"];
+
+function weightedOverall(byCategory) {
+  let num = 0;
+  let den = 0;
+  for (const c of Object.values(byCategory)) {
+    if (typeof c.avgScore === "number" && c.n) {
+      num += c.avgScore * c.n;
+      den += c.n;
+    }
+  }
+  return den ? num / den : null;
+}
+
+// Per-test composite score (mean of that case's metric scores) from the flat JSONL of a run.
+function loadTests(runId) {
+  const file = path.join(RESULTS_DIR, "results.flat." + runId + ".jsonl");
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => {
+      const o = JSON.parse(l);
+      const vals = Object.values(o.metricScores || {}).filter((v) => typeof v === "number");
+      const score = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      return { id: o.testCaseId, category: o.category, score };
+    });
+}
+
+function loadRuns() {
+  if (!fs.existsSync(RESULTS_DIR)) return [];
+  const files = fs
+    .readdirSync(RESULTS_DIR)
+    .filter((f) => /^diagnostics\..*\.json$/.test(f));
+
+  const runs = files.map((f) => {
+    const d = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, f), "utf8"));
+    const grid = d.metricByCategoryGrid || { rows: [] };
+    const metrics = {};
+    for (const row of grid.rows) {
+      metrics[row.metric] = {
+        stage: row.stage,
+        byCategory: row.byCategory,
+        overall: weightedOverall(row.byCategory),
+      };
+    }
+    return {
+      runId: d.runId,
+      promptVersion: d.promptVersion,
+      modelVersion: d.modelVersion,
+      knowledgeBaseVersion: d.knowledgeBaseVersion,
+      judgeModel: d.judgeModel,
+      generatedAt: d.generatedAt,
+      metrics,
+      tests: loadTests(d.runId),
+    };
+  });
+
+  // Chronological order (fall back to runId string).
+  runs.sort((a, b) =>
+    (a.generatedAt || a.runId).localeCompare(b.generatedAt || b.runId)
+  );
+  return runs;
+}
+
+function buildMetricList(runs) {
+  const seen = new Map(); // name -> stage
+  for (const r of runs) {
+    for (const [name, m] of Object.entries(r.metrics)) {
+      if (!seen.has(name)) seen.set(name, m.stage);
+    }
+  }
+  const list = [...seen.entries()].map(([name, stage]) => ({
+    name,
+    stage,
+    threshold: config.thresholds[THRESHOLD_KEY[name]] ?? 0.7,
+  }));
+  list.sort((a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage));
+  return list;
+}
+
+function buildCategories(runs) {
+  const set = new Set();
+  for (const r of runs) {
+    for (const m of Object.values(r.metrics)) {
+      for (const cat of Object.keys(m.byCategory)) set.add(cat);
+    }
+  }
+  return [...set].sort();
+}
+
+function generateHtml(runs, metrics, categories) {
+  const payload = { runs, metrics, categories, generatedAt: new Date().toISOString(), judge: config.judge };
+  const dataJson = JSON.stringify(payload);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LLM Eval Trend Dashboard</title>
+<style>
+  :root { --bg:#0b0e13; --card:#161b23; --card2:#1b212b; --ink:#eef1f6; --muted:#8f9bab;
+          --line:#28303c; --good:#33b06a; --bad:#f0616a; --accent:#5b8def; --accent2:#9b6dff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         color:var(--ink); background:
+           radial-gradient(1100px 480px at 10% -12%, rgba(91,141,239,.14), transparent 60%),
+           radial-gradient(900px 460px at 100% -4%, rgba(155,109,255,.12), transparent 55%),
+           var(--bg); }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5;
+           background:linear-gradient(180deg, rgba(17,21,28,.95), rgba(11,14,19,.82)); backdrop-filter:blur(8px); }
+  .brand { display:flex; align-items:center; gap:14px; }
+  .logo { width:42px; height:42px; flex:0 0 auto; filter:drop-shadow(0 3px 10px rgba(91,141,239,.5)); }
+  h1 { margin:0; font-size:22px; font-weight:700; letter-spacing:.2px;
+       background:linear-gradient(90deg,#d6e4ff,#b9a3ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { color:var(--muted); font-size:12px; margin-top:3px; }
+  .controls { margin-top:14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  select { background:var(--card2); color:var(--ink); border:1px solid var(--line);
+           border-radius:9px; padding:7px 11px; font-size:13px; transition:border-color .12s; }
+  select:hover { border-color:var(--accent); }
+  .legend { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; font-size:11px; color:var(--muted); }
+  .legend span { background:var(--card); border:1px solid var(--line); border-radius:999px; padding:3px 10px; }
+  .legend b { color:var(--ink); }
+  main { padding:18px 22px 40px; }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+       margin:26px 0 12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  details.sec { margin:16px 0; }
+  details.sec > summary { list-style:none; cursor:pointer; font-size:16px; text-transform:uppercase;
+       letter-spacing:.08em; color:var(--ink); border-bottom:1px solid var(--line);
+       padding-bottom:6px; margin-bottom:12px; user-select:none; }
+  details.sec > summary::-webkit-details-marker { display:none; }
+  details.sec > summary::before { content:"\\25B8"; display:inline-block; margin-right:8px;
+       transition:transform .15s; color:var(--muted); }
+  details.sec[open] > summary::before { transform:rotate(90deg); }
+  .grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:14px; }
+  table.rt { width:100%; border-collapse:collapse; margin:4px 0 8px; font-size:12px; }
+  table.rt th, table.rt td { border:1px solid var(--line); padding:6px 9px; text-align:left; white-space:nowrap; }
+  table.rt th { color:var(--muted); font-weight:600; background:#141a22; position:sticky; top:0; }
+  table.rt tbody tr:nth-child(even) { background:rgba(255,255,255,.02); }
+  table.rt tbody tr:hover { background:rgba(91,141,239,.09); }
+  .tbl-wrap { overflow-x:auto; }
+  .mut { color:var(--muted); }
+  .pos { color:var(--good); } .neg { color:var(--bad); } .zero { color:var(--muted); }
+  .currentwrap { display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; }
+  .currentwrap > .tbl-wrap { flex:1 1 460px; }
+  .summary { flex:1 1 300px; background:linear-gradient(180deg,var(--card2),var(--card)); border:1px solid var(--line);
+       border-radius:14px; padding:12px 14px; font-size:12px; box-shadow:0 1px 2px rgba(0,0,0,.3); }
+  .summary h3 { margin:12px 0 6px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  .summary h3:first-child { margin-top:0; }
+  .summary ul { margin:0; padding-left:16px; }
+  .summary li { margin:4px 0; }
+  .gl { display:flex; gap:12px; }
+  .gl > div { flex:1 1 0; min-width:0; }
+  .gl .lab { font-size:11px; color:var(--muted); margin:2px 0 4px; }
+  .concern { display:flex; justify-content:space-between; gap:8px; padding:5px 9px;
+       border:1px solid var(--line); border-radius:8px; margin:5px 0; }
+  .concern .v { font-variant-numeric:tabular-nums; }
+  .card { position:relative; background:linear-gradient(180deg,var(--card2),var(--card)); border:1px solid var(--line);
+       border-radius:14px; padding:14px 13px 8px; box-shadow:0 1px 2px rgba(0,0,0,.3); overflow:hidden;
+       transition:transform .12s, box-shadow .12s, border-color .12s; }
+  .card::before { content:""; position:absolute; left:0; top:0; right:0; height:2px;
+       background:linear-gradient(90deg,var(--accent),var(--accent2)); opacity:.65; }
+  .card:hover { transform:translateY(-2px); box-shadow:0 10px 26px rgba(0,0,0,.42); border-color:#3a4658; }
+  .card .top { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px; }
+  .card .name { font-size:13px; font-weight:600; }
+  .card .latest { font-size:13px; font-variant-numeric:tabular-nums; }
+  .delta { font-size:11px; padding:1px 6px; border-radius:6px; margin-left:6px; }
+  .up { color:var(--good); } .down { color:var(--bad); } .flat { color:var(--muted); }
+  svg text { fill:var(--muted); font-size:8px; }
+  .foot { font-size:10px; color:var(--muted); margin-top:2px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-label="AI">
+      <defs>
+        <linearGradient id="aiG" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#5b8def"/><stop offset="1" stop-color="#9b6dff"/>
+        </linearGradient>
+      </defs>
+      <rect x="2" y="2" width="44" height="44" rx="13" fill="url(#aiG)"/>
+      <g fill="#fff">
+        <path d="M19 8 L22.4 16.6 L31 20 L22.4 23.4 L19 32 L15.6 23.4 L7 20 L15.6 16.6 Z"/>
+        <path d="M36 7 L37.6 11.4 L42 13 L37.6 14.6 L36 19 L34.4 14.6 L30 13 L34.4 11.4 Z"/>
+        <path d="M34 29 L35.2 32 L38.4 33.2 L35.2 34.4 L34 37.5 L32.8 34.4 L29.6 33.2 L32.8 32 Z"/>
+      </g>
+    </svg>
+    <div>
+      <h1>LLM Eval Trend Dashboard</h1>
+      <div class="sub" id="subtitle"></div>
+    </div>
+  </div>
+  <div class="controls">
+    <label class="sub" for="catSel">View:</label>
+    <select id="catSel"></select>
+  </div>
+  <div class="legend">
+    <span><b style="color:var(--good)">&#9679;</b> at/above threshold</span>
+    <span><b style="color:var(--bad)">&#9679;</b> below threshold</span>
+    <span>- - - threshold line</span>
+  </div>
+</header>
+<main>
+  <details class="sec" open>
+    <summary>&#128451;&#65039; Runs</summary>
+    <div class="tbl-wrap" id="runsTable"></div>
+  </details>
+  <details class="sec" open>
+    <summary>&#127919; Current run</summary>
+    <div class="currentwrap">
+      <div class="tbl-wrap" id="latestTable"></div>
+      <div class="summary" id="latestSummary"></div>
+    </div>
+  </details>
+  <details class="sec" open>
+    <summary>&#128200; Trends</summary>
+    <div id="sections"></div>
+  </details>
+</main>
+
+<script>
+const DATA = ${dataJson};
+
+const STAGE_ORDER = ["Response", "Retrieval", "Safety"];
+const el = (id) => document.getElementById(id);
+
+function valueFor(run, metricName, category) {
+  const m = run.metrics[metricName];
+  if (!m) return { v: null, n: 0, passRate: null };
+  if (category === "__overall__") return { v: m.overall, n: null, passRate: null };
+  const c = m.byCategory[category];
+  return c ? { v: c.avgScore, n: c.n, passRate: c.passRate } : { v: null, n: 0, passRate: null };
+}
+
+function chartSvg(metric, category) {
+  const W = 380, H = 250, L = 34, R = 366, T = 14, B = 150;
+  const x = (i, n) => (n <= 1 ? (L + R) / 2 : L + (i * (R - L)) / (n - 1));
+  const y = (v) => B - v * (B - T);
+  const runs = DATA.runs;
+  const n = runs.length;
+
+  const pts = runs.map((r, i) => ({ ...valueFor(r, metric.name, category), x: x(i, n), r }));
+
+  // gridlines + y labels
+  let g = "";
+  [0, 0.25, 0.5, 0.75, 1].forEach((v) => {
+    g += '<line x1="' + L + '" y1="' + y(v) + '" x2="' + R + '" y2="' + y(v) + '" stroke="#242c36"/>';
+    g += '<text x="' + (L - 5) + '" y="' + (y(v) + 3) + '" text-anchor="end">' + v.toFixed(2) + '</text>';
+  });
+
+  // threshold line
+  const ty = y(metric.threshold);
+  g += '<line x1="' + L + '" y1="' + ty + '" x2="' + R + '" y2="' + ty + '" stroke="#e5484d" stroke-dasharray="4 3" opacity="0.7"/>';
+
+  // connect consecutive non-null points (break on null)
+  let pathSegs = [];
+  let cur = [];
+  for (const p of pts) {
+    if (p.v == null) { if (cur.length) { pathSegs.push(cur); cur = []; } }
+    else cur.push(p);
+  }
+  if (cur.length) pathSegs.push(cur);
+  let lines = pathSegs.map((seg) =>
+    '<polyline fill="none" stroke="#4c8bf5" stroke-width="1.5" points="' +
+    seg.map((p) => p.x.toFixed(1) + "," + y(p.v).toFixed(1)).join(" ") + '"/>'
+  ).join("");
+
+  // points + x labels
+  let dots = "", xlabels = "";
+  pts.forEach((p) => {
+    // Full runId on every x tick, rotated to fit.
+    xlabels += '<text x="' + p.x + '" y="' + (B + 10) + '" transform="rotate(-40 ' + p.x + ' ' + (B + 10) + ')" text-anchor="end" font-size="7">' + p.r.runId + '</text>';
+    if (p.v == null) return;
+    const color = p.v >= metric.threshold ? "#2e9d5b" : "#e5484d";
+    const tip = metric.name + "  " + p.v.toFixed(3) +
+      "\\nrun " + p.r.runId + "\\nprompt " + p.r.promptVersion +
+      (p.passRate != null ? "\\npassRate " + p.passRate : "") +
+      (p.n != null ? "\\nn=" + p.n : "");
+    dots += '<circle cx="' + p.x.toFixed(1) + '" cy="' + y(p.v).toFixed(1) + '" r="3.5" fill="' + color + '">' +
+            '<title>' + tip + '</title></circle>';
+  });
+
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">' +
+         g + lines + dots + xlabels + '</svg>';
+}
+
+function deltaBadge(metric, category) {
+  const vals = DATA.runs.map((r) => valueFor(r, metric.name, category).v).filter((v) => v != null);
+  if (vals.length < 2) return '<span class="delta flat">-</span>';
+  const d = vals[vals.length - 1] - vals[vals.length - 2];
+  if (Math.abs(d) < 0.001) return '<span class="delta flat">&#8226; 0.00</span>';
+  const cls = d > 0 ? "up" : "down";
+  const arrow = d > 0 ? "&#9650;" : "&#9660;";
+  return '<span class="delta ' + cls + '">' + arrow + " " + (d > 0 ? "+" : "") + d.toFixed(2) + '</span>';
+}
+
+function latestValue(metric, category) {
+  const vals = DATA.runs.map((r) => valueFor(r, metric.name, category).v).filter((v) => v != null);
+  return vals.length ? vals[vals.length - 1].toFixed(3) : "-";
+}
+
+function fmtDelta(d) {
+  if (d == null) return '<span class="zero">-</span>';
+  if (Math.abs(d) < 0.001) return '<span class="zero">&#8226; 0.00</span>';
+  const cls = d > 0 ? "pos" : "neg";
+  const arrow = d > 0 ? "&#9650;" : "&#9660;";
+  return '<span class="' + cls + '">' + arrow + " " + (d > 0 ? "+" : "") + d.toFixed(2) + "</span>";
+}
+
+function buildRunsTable() {
+  // Newest first.
+  const rows = [...DATA.runs].reverse().map((r) => {
+    const dt = r.generatedAt ? new Date(r.generatedAt).toLocaleString() : "";
+    return "<tr><td>" + r.runId + "</td><td>" + (r.promptVersion || "") + "</td><td>" +
+      (r.knowledgeBaseVersion || "") + "</td><td>" + (r.modelVersion || "") + "</td><td>" +
+      (r.judgeModel || "") + "</td><td>" + dt + "</td></tr>";
+  }).join("");
+  el("runsTable").innerHTML =
+    '<table class="rt"><thead><tr><th>Run ID</th><th>Prompt version</th><th>Context version</th>' +
+    "<th>Model version</th><th>Judge version</th><th>Date &amp; time</th></tr></thead><tbody>" +
+    rows + "</tbody></table>";
+}
+
+function buildLatestTable(category) {
+  const runs = DATA.runs;
+  const n = runs.length;
+  const latest = runs[n - 1];
+  const prev = n >= 2 ? runs[n - 2] : null;
+  const base = runs[0];
+
+  const rows = DATA.metrics.map((m) => {
+    const cur = valueFor(latest, m.name, category).v;
+    const pv = prev ? valueFor(prev, m.name, category).v : null;
+    const bv = valueFor(base, m.name, category).v;
+    const dPrev = cur != null && pv != null ? cur - pv : null;
+    const dBase = cur != null && bv != null && base !== latest ? cur - bv : null;
+    const curStr = cur != null ? cur.toFixed(3) : "-";
+    const curCls = cur != null ? (cur >= m.threshold ? "pos" : "neg") : "zero";
+    return "<tr><td>" + m.name + ' <span class="mut">(' + m.stage + ")</span></td>" +
+      '<td class="' + curCls + '">' + curStr + "</td><td>" + fmtDelta(dPrev) + "</td><td>" + fmtDelta(dBase) + "</td></tr>";
+  }).join("");
+
+  el("latestTable").innerHTML =
+    '<div class="mut" style="font-size:11px;margin-bottom:4px">Latest: ' + latest.runId +
+    " (" + latest.promptVersion + ")  &#183;  baseline: " + base.runId +
+    "  &#183;  view: " + (category === "__overall__" ? "Overall" : category) + "</div>" +
+    '<table class="rt"><thead><tr><th>Metric</th><th>Current value</th>' +
+    "<th>&#916; vs previous</th><th>&#916; vs baseline</th></tr></thead><tbody>" + rows + "</tbody></table>";
+}
+
+// Observations + top-3 concerns for the latest run, in the current view (overall or category).
+function buildLatestSummary(category) {
+  const runs = DATA.runs;
+  const n = runs.length;
+  const latest = runs[n - 1];
+  const prev = n >= 2 ? runs[n - 2] : null;
+
+  const rows = DATA.metrics.map((m) => {
+    const cur = valueFor(latest, m.name, category).v;
+    const pv = prev ? valueFor(prev, m.name, category).v : null;
+    return { name: m.name, stage: m.stage, threshold: m.threshold, cur, dPrev: cur != null && pv != null ? cur - pv : null };
+  }).filter((r) => r.cur != null);
+
+  if (!rows.length) { el("latestSummary").innerHTML = '<span class="mut">No data for this view.</span>'; return; }
+
+  const total = rows.length;
+  const pass = rows.filter((r) => r.cur >= r.threshold).length;
+  const stageFails = {};
+  rows.forEach((r) => { if (r.cur < r.threshold) stageFails[r.stage] = (stageFails[r.stage] || 0) + 1; });
+  const worstStage = Object.entries(stageFails).sort((a, b) => b[1] - a[1])[0];
+  const withDelta = rows.filter((r) => r.dPrev != null);
+  const up = withDelta.slice().sort((a, b) => b.dPrev - a.dPrev)[0];
+  const down = withDelta.slice().sort((a, b) => a.dPrev - b.dPrev)[0];
+
+  const obs = [];
+  obs.push("<li><b>" + pass + "/" + total + "</b> metrics meet threshold (" + (total - pass) + " below).</li>");
+  if (worstStage) obs.push("<li>Most failures in <b>" + worstStage[0] + "</b> stage (" + worstStage[1] + ").</li>");
+  if (up && up.dPrev > 0.001) obs.push('<li>Biggest gain vs previous: <b>' + up.name + '</b> ' + fmtDelta(up.dPrev) + '</li>');
+  if (down && down.dPrev < -0.001) obs.push('<li>Biggest drop vs previous: <b>' + down.name + '</b> ' + fmtDelta(down.dPrev) + '</li>');
+
+  // Top 3 concerns: furthest below threshold first, then lowest scores.
+  const concerns = rows.slice().sort((a, b) => (a.cur - a.threshold) - (b.cur - b.threshold)).slice(0, 3);
+  const concernHtml = concerns.map((c) => {
+    const cls = c.cur >= c.threshold ? "pos" : "neg";
+    return '<div class="concern"><span class="n">' + c.name + ' <span class="mut">(' + c.stage + ')</span></span>' +
+      '<span class="v ' + cls + '">' + c.cur.toFixed(3) + ' / ' + c.threshold + " " + fmtDelta(c.dPrev) + "</span></div>";
+  }).join("");
+
+  el("latestSummary").innerHTML =
+    "<h3>&#128269; Observations</h3><ul>" + obs.join("") + "</ul>" +
+    "<h3>&#9888;&#65039; Top 3 areas of concern</h3>" + concernHtml +
+    "<h3>&#128202; Category movers (latest vs previous)</h3>" + moversHtml(categoryDeltas(), (x) => x.name) +
+    "<h3>&#129514; Test movers (latest vs previous)</h3>" +
+      moversHtml(testDeltas(), (x) => x.id + ' <span class="mut">(' + x.category + ")</span>");
+}
+
+// Composite score for a category in a run = mean of its metric avgScores.
+function catComposite(run, cat) {
+  const vals = DATA.metrics
+    .map((m) => (run.metrics[m.name] && run.metrics[m.name].byCategory[cat] ? run.metrics[m.name].byCategory[cat].avgScore : null))
+    .filter((v) => typeof v === "number");
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function categoryDeltas() {
+  const n = DATA.runs.length;
+  if (n < 2) return [];
+  const latest = DATA.runs[n - 1], prev = DATA.runs[n - 2];
+  return DATA.categories
+    .map((cat) => {
+      const cu = catComposite(latest, cat), pv = catComposite(prev, cat);
+      return { name: cat, delta: cu != null && pv != null ? cu - pv : null };
+    })
+    .filter((x) => x.delta != null);
+}
+
+function testDeltas() {
+  const n = DATA.runs.length;
+  if (n < 2) return [];
+  const latest = DATA.runs[n - 1], prev = DATA.runs[n - 2];
+  const pmap = {};
+  (prev.tests || []).forEach((t) => (pmap[t.id] = t));
+  return (latest.tests || [])
+    .map((t) => {
+      const p = pmap[t.id];
+      return { id: t.id, category: t.category, delta: p && t.score != null && p.score != null ? t.score - p.score : null };
+    })
+    .filter((x) => x.delta != null);
+}
+
+// Two mini-columns: top 3 gainers (largest positive delta) and top 3 losers (largest negative delta).
+function moversHtml(items, labelFn) {
+  if (!items.length) return '<span class="mut">Need &#8805; 2 runs.</span>';
+  const gainers = items.slice().sort((a, b) => b.delta - a.delta).slice(0, 3);
+  const losers = items.slice().sort((a, b) => a.delta - b.delta).slice(0, 3);
+  const item = (x) => '<div class="concern"><span class="n">' + labelFn(x) + '</span><span class="v">' + fmtDelta(x.delta) + "</span></div>";
+  return '<div class="gl"><div><div class="lab">Gainers</div>' + gainers.map(item).join("") +
+    '</div><div><div class="lab">Losers</div>' + losers.map(item).join("") + "</div></div>";
+}
+
+function render(category) {
+  buildLatestTable(category);
+  buildLatestSummary(category);
+  const host = el("sections");
+  host.innerHTML = "";
+  for (const stage of STAGE_ORDER) {
+    const ms = DATA.metrics.filter((m) => m.stage === stage);
+    if (!ms.length) continue;
+    const h2 = document.createElement("h2");
+    const stageEmoji = { Response: "\u{1F9E0}", Retrieval: "\u{1F50D}", Safety: "\u{1F6E1}\uFE0F" };
+    h2.textContent = (stageEmoji[stage] || "") + " " + stage + " metrics";
+    host.appendChild(h2);
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    for (const m of ms) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML =
+        '<div class="top"><span class="name">' + m.name + '</span>' +
+        '<span class="latest">' + latestValue(m, category) + deltaBadge(m, category) + '</span></div>' +
+        chartSvg(m, category) +
+        '<div class="foot">threshold ' + m.threshold + '</div>';
+      grid.appendChild(card);
+    }
+    host.appendChild(grid);
+  }
+}
+
+function init() {
+  el("subtitle").textContent =
+    DATA.runs.length + " runs  \\u00b7  judge " + (DATA.judge && DATA.judge.model ? DATA.judge.model : "-") +
+    "  \\u00b7  generated " + new Date(DATA.generatedAt).toLocaleString();
+
+  const sel = el("catSel");
+  const opts = ['<option value="__overall__">Overall (all categories)</option>']
+    .concat(DATA.categories.map((c) => '<option value="' + c + '">' + c + '</option>'));
+  sel.innerHTML = opts.join("");
+  sel.addEventListener("change", () => render(sel.value));
+  buildRunsTable();
+  render("__overall__");
+}
+init();
+</script>
+</body>
+</html>
+`;
+}
+
+function main() {
+  const runs = loadRuns();
+  if (!runs.length) {
+    console.error("No results/diagnostics.RUN-*.json files found. Run an evaluation first (npm run eval).");
+    process.exit(1);
+  }
+  const metrics = buildMetricList(runs);
+  const categories = buildCategories(runs);
+  const html = generateHtml(runs, metrics, categories);
+  const out = path.join(RESULTS_DIR, "dashboard.html");
+  fs.writeFileSync(out, html);
+  console.log(`Dashboard written: results/dashboard.html  (${runs.length} runs, ${metrics.length} metrics, ${categories.length} categories)`);
+}
+
+main();
