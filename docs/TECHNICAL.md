@@ -187,10 +187,3 @@ threshold; worst cells are ranked by `failRate × caseCount`.
   uses `127.0.0.1`.
 
 ---
-
-## 9. Extending
-
-- **Add a metric:** register it in `python/evaluate.py` (`build_metrics`), add its threshold in
-  `config.js`, and its stage in `src/diagnostics.js` (`METRIC_STAGE`). It flows through automatically.
-- **Add goldens:** append to `dataset/goldens.json` with `category`, `subcategory`, `journey`, `evalType`.
-- **New taxonomy:** the matrices and dashboard derive categories/journeys from the data — no code change.
