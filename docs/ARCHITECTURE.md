@@ -1,6 +1,7 @@
-# Architecture
+# Architecture diagram 
 
 ---
+This diagram been generated through AI.
 
 ## 1. Component / container view
 
