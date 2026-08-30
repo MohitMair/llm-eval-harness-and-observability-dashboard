@@ -157,6 +157,10 @@ deepEval/
 
 See [`docs/TECHNICAL.md`](docs/TECHNICAL.md) for internals and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for diagrams.
 
-## 8. Project layout
+## 8. Reports and Dashboard
+Reports are generated per run in following format:
+1. json
+2. csv
+3. dashboard
 
 
