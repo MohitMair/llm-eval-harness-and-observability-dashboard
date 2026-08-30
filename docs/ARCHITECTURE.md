@@ -1,8 +1,5 @@
 # Architecture
 
-Diagrams for the DeepEval AA‑breakdown evaluation harness. All diagrams are Mermaid and render on GitHub /
-VS Code Mermaid preview.
-
 ---
 
 ## 1. Component / container view
